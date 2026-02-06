@@ -1,6 +1,6 @@
 {
   "name": "pi-cline-free-models",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "A Pi extension to use Cline models as a provider.",
   "type": "module",
   "main": "index.ts",
