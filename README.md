@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="banner.webp" alt="pi-cline-free-models" width="100%">
+  <img src="https://raw.githubusercontent.com/ditfetzt/pi-cline-free-models/main/banner.webp" alt="pi-cline-free-models" width="100%">
 </p>
 
 <div align="center">

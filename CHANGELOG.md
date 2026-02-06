@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-02-06
+
+### Documentation
+- Fixed broken banner image on npm by using an absolute GitHub raw URL.
+
 ## [0.1.4] - 2026-02-06
 
 ### Documentation
