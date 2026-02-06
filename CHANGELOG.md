@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-02-06
+
+### Documentation
+- Updated README text to clarify model availability and authentication flow.
+
 ## [0.1.3] - 2026-02-06
 
 ### Documentation

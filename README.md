@@ -16,17 +16,9 @@
 
 ## Why?
 
-Cline has an amazing ecosystem of models, including high-performance free tiers and specialized reasoning models that aren't natively available in every tool. 
+Cline has usually a bunch of free models available that stay usable for some time. 
 
-**pi-cline-free-models** bridges this gap. It acts as a provider extension for Pi, giving you instant access to models like **Kimi K2.5**, **MiniMax**, and others without needing to manage complex API keys or configurations manually. It handles the OAuth handshake with Cline securely and seamlessly.
-
-## Features
-
--   **🔓 Access Free Models**: Instantly use models like **Kimi K2.5**, **MiniMax M2.1**, and **Giga Potato** without an API key.
--   **🔄 Dynamic Updates**: Automatically fetches the latest model list from Cline's repository on startup.
--   **🧠 Reasoning Support**: Full support for Chain-of-Thought (CoT) models.
--   **👁️ Vision Capable**: Image support for multimodal models.
--   **🔐 Seamless OAuth**: Authenticates securely via Cline's official login flow.
+**pi-cline-free-models** enables you to make use of those models. It acts as a provider extension for Pi, giving you instant access to models like **Kimi K2.5**, **MiniMax** and others as long as they stay available. The extension automatically fetches the latest model list on startup. Means if models are not supported anymore, you will notice. OAuth handshake with Cline is handled securely and seamlessly via SSO, just use your desired way of logging in with their platform (Google, Github, Microsoft).
 
 ## Installation
 
@@ -39,29 +31,19 @@ pi install npm:pi-cline-free-models
 ## Usage
 
 ### 1. Select a Model
-Once installed, the models will appear in your Pi model selector under the **Cline** provider.
-
-Common models include:
-- `cline/moonshotai/kimi-k2.5` (Reasoning + Vision)
-- `cline/minimax/minimax-m2.1` (Reasoning)
-- `cline/stealth/giga-potato` (Fast/Free)
+Once installed, the models might not right away appear in your Pi model selector under the **Cline** provider.
+If so, authenticate first. Every other time the models will be found via `/scoped-models`.
 
 ### 2. Authentication
-The first time you try to use a model, the extension will initiate an OAuth flow:
 
-1. A browser window will open pointing to `cline.bot`.
-2. Log in with your GitHub account.
-3. You will be redirected to a local server (`http://127.0.0.1:31234`).
-4. **Close the tab** when you see "Authenticated!".
-5. Pi is now authorized to generate text.
+1. Use `/login` and pick "Cline" as provider
+2. You will be redirected to the website of Cline
+3. Log in with your desired SSO method and get a notification about success
+4. **Close the tab** after authentication
+5. Pi is now authorized to generate text
 
 ### 3. Update Models
-The extension checks for new models every time Pi starts a new session. If Cline adds a new free model to their list, it will automatically appear in your selector.
-
-## Troubleshooting
-
-**Authentication fails / Callback URL error**
-- Ensure that port `31234` is not blocked on your machine. The extension spins up a temporary local server on this port to capture the authentication token.
+The extension checks for new models every time Pi starts a new session. If Cline adds a new free model to their list, it will automatically appear in your selector the next time you start Pi or use `/reload`.
 
 ## Development
 
