@@ -1,4 +1,4 @@
-# pi-cline-extension
+# pi-cline-free-models
 
 ![Banner](banner.webp)
 
@@ -7,15 +7,14 @@ A Pi extension to use Cline models as a provider.
 ## Installation
 
 ```bash
-pi install npm:pi-cline-extension
+pi install npm:pi-cline-free-models
 ```
 
 ## Features
 
-- Dynamic fetching of free models from Cline.
-- Support for OpenRouter models.
-- Full OAuth flow for Cline.
-- Support for reasoning models (Kimi K2.5, MiniMax M2.1, etc.).
+- Dynamic fetching of free models from Cline
+- Support for OpenRouter models
+- Full OAuth flow for Cline
 
 ## Development
 
