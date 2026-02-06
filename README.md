@@ -52,7 +52,7 @@ The extension checks for new models every time Pi starts a new session. If Cline
    ```bash
    npm install
    ```
-3. Link for local testing:
+3. Install locally for development:
    ```bash
    pi install .
    ```
