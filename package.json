@@ -1,0 +1,32 @@
+{
+  "name": "pi-cline-extension",
+  "version": "1.0.0",
+  "description": "A Pi extension to use Cline models as a provider.",
+  "type": "module",
+  "main": "index.ts",
+  "files": [
+    "*.ts",
+    "*.md",
+    "*.json",
+    "banner.webp"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-agent",
+    "extension",
+    "cline"
+  ],
+  "author": "",
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@mariozechner/pi-coding-agent": "latest",
+    "@mariozechner/pi-ai": "latest"
+  }
+}
