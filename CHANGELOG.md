@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.1.7] - 2026-02-07
+### Fixed
+- Fixed compatibility with Pi v0.52.7+ standards.
+- Made model fetching non-blocking to prevent UI/Slash command freezes on startup.
+- Added background model updates after session start.
+- Ensured all models have strictly valid metadata (cost, input, contextWindow) for latest Pi versions.
+- Added fetch timeouts and defensive error handling during provider registration.
+
 ## [0.1.6] - 2026-02-06
 
 ### Documentation

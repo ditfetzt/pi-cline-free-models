@@ -8,17 +8,36 @@ export default function (pi: ExtensionAPI) {
   const fallbackModels = getFallbackModels();
   registerClineProvider(pi, fallbackModels);
 
-  // 2. Schedule dynamic update
+  // 2. Schedule non-blocking update on session start
   pi.on("session_start", async (_event, ctx) => {
-    try {
-      const models = await fetchModels();
-      registerClineProvider(pi, models);
-      ctx.ui.notify(`Cline extension updated with ${models.length} models.`, "info");
-    } catch (error) {
-      console.error("Failed to update Cline models:", error);
-      ctx.ui.notify("Failed to fetch latest Cline models, using built-in list.", "warning");
-    }
+    // Run in background to avoid blocking Pi's startup/UI sequence
+    (async () => {
+      try {
+        const models = await fetchModels();
+        if (models.length > 0) {
+          registerClineProvider(pi, models);
+          ctx.ui.notify(`Cline extension updated with ${models.length} models.`, "info");
+        }
+      } catch (error) {
+        console.error("[Cline] Failed to update models:", error);
+        // We already have fallback models registered, so no need to notify of failure
+        // unless it's a critical error.
+      }
+    })();
   });
+}
+
+// Helper to fetch with timeout
+async function fetchWithTimeout(url: string, timeoutMs: number = 8000): Promise<Response | null> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    return response;
+  } catch (e) {
+    return null;
+  }
 }
 
 async function fetchModels(): Promise<any[]> {
@@ -28,8 +47,8 @@ async function fetchModels(): Promise<any[]> {
   // 1. Dynamically fetch the list of "free" models from Cline's GitHub source
   try {
     const featuredModelsUrl = "https://raw.githubusercontent.com/cline/cline/main/cli/src/constants/featured-models.ts";
-    const response = await fetch(featuredModelsUrl);
-    if (response.ok) {
+    const response = await fetchWithTimeout(featuredModelsUrl, 5000);
+    if (response?.ok) {
       const text = await response.text();
       const freeBlockMatch = text.match(/free:\s*\[([\s\S]*?)\]/);
       if (freeBlockMatch) {
@@ -39,45 +58,44 @@ async function fetchModels(): Promise<any[]> {
           knownFreeIds.push(match[1]);
         }
       }
-    } else {
-      console.warn("Failed to fetch featured-models.ts, using fallback list.");
-      knownFreeIds.push(...getFallbackIds());
     }
   } catch (e) {
-    console.warn("Error fetching featured models:", e);
+    console.warn("[Cline] Error fetching featured models:", e);
+  }
+
+  // Fallback to minimal set if fetch failed
+  if (knownFreeIds.length === 0) {
     knownFreeIds.push(...getFallbackIds());
   }
 
   // 2. Fetch OpenRouter metadata
   let openRouterModels: any[] = [];
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/models");
-    if (response.ok) {
+    const response = await fetchWithTimeout("https://openrouter.ai/api/v1/models", 8000);
+    if (response?.ok) {
       const data = await response.json();
       openRouterModels = (data as any).data || [];
     }
   } catch (e) {
-    console.warn("Error fetching OpenRouter models:", e);
+    console.warn("[Cline] Error fetching OpenRouter models:", e);
   }
 
-  // 3. Merge
+  // 3. Merge and validate
   for (const id of knownFreeIds) {
     const info = openRouterModels.find((m: any) => m.id === id);
     
-    // Default values
+    // Default values (latest standards)
     let isReasoning = false;
     let contextWindow = 128000;
     let maxTokens = 8192;
-    let supportsPromptCache = false;
     let name = `${extractNameFromId(id)} (Cline)`;
     let input = ["text"];
-    let cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }; // Initialize cost variable
+    let cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
     if (info) {
        name = `${info.name} (Cline)`;
        
        // Detect Reasoning
-       // OpenRouter often puts this in supported_parameters or architecture
        if (info.supported_parameters?.includes("include_reasoning") || 
            info.supported_parameters?.includes("reasoning") ||
            info.architecture?.instruct_type === "reasoning") {
@@ -89,48 +107,34 @@ async function fetchModels(): Promise<any[]> {
          input = ["text", "image"];
        }
 
-       // Detect Prompt Caching (heuristic based on pricing)
-       if (info.pricing && parseFloat(info.pricing.input_cache_read) > 0) {
-          supportsPromptCache = true;
-       }
-
        contextWindow = info.context_length || contextWindow;
        maxTokens = info.top_provider?.max_completion_tokens || maxTokens;
 
-       // Cost Preparation: Parse actual costs from OpenRouter
+       // Parse costs (per million tokens)
        const inputCost = parseFloat(info.pricing?.prompt || "0") * 1000000;
        const outputCost = parseFloat(info.pricing?.completion || "0") * 1000000;
        const cacheReadCost = parseFloat(info.pricing?.input_cache_read || "0") * 1000000;
        const cacheWriteCost = parseFloat(info.pricing?.input_cache_write || "0") * 1000000;
 
-       // Apply Cost logic: 
-       // If it's a known free ID, force 0. Otherwise (paid/unknown), use real cost.
+       // Cline featured free models logic
        if (knownFreeIds.includes(id) || id === "stealth/giga-potato") {
          cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
        } else {
-         cost = { 
-           input: inputCost, 
-           output: outputCost, 
-           cacheRead: cacheReadCost, 
-           cacheWrite: cacheWriteCost 
-         };
+         cost = { input: inputCost, output: outputCost, cacheRead: cacheReadCost, cacheWrite: cacheWriteCost };
        }
-
     } else {
       // Manual overrides for known IDs if not on OpenRouter
       if (id === "moonshotai/kimi-k2.5") {
          input = ["text", "image"];
          contextWindow = 262144;
-         isReasoning = true; // Kimi supports reasoning
+         isReasoning = true;
       } else if (id === "minimax/minimax-m2.1") {
-         isReasoning = true; // Minimax supports reasoning
+         isReasoning = true;
       }
-
-      // Fallback cost is 0 for hardcoded free models
       cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     }
 
-    // Force reasoning for known capable models even if OpenRouter metadata misses it
+    // Force reasoning for known capable models
     if (id === "moonshotai/kimi-k2.5" || id === "minimax/minimax-m2.1") {
         isReasoning = true;
     }
@@ -146,7 +150,7 @@ async function fetchModels(): Promise<any[]> {
     });
   }
 
-  // 4. Stealth Model
+  // 4. Ensure Stealth Model is included
   if (!models.find(m => m.id === "stealth/giga-potato")) {
      models.push({
         id: "stealth/giga-potato",
@@ -228,22 +232,33 @@ function getFallbackModels() {
 }
 
 function registerClineProvider(pi: ExtensionAPI, models: any[]) {
-  // Mimic VS Code extension headers for anonymity
   const headers = {
     "HTTP-Referer": "https://cline.bot",
     "X-Title": "Cline",
     "X-Client-Type": "extension",
-    "X-Client-Version": "3.57.1", 
+    "X-Client-Version": "3.57.1",
     "X-Core-Version": "3.57.1",
     "User-Agent": "Cline/3.57.1",
   };
+
+  // Ensure all models have strictly valid metadata
+  const validatedModels = models.map(model => ({
+    id: model.id,
+    name: model.name || model.id,
+    reasoning: !!model.reasoning,
+    input: Array.isArray(model.input) ? model.input : ["text"],
+    cost: model.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: model.contextWindow || 128000,
+    maxTokens: model.maxTokens || 16384,
+    compat: model.compat,
+  }));
 
   pi.registerProvider("cline", {
     baseUrl: "https://api.cline.bot/api/v1",
     authHeader: true,
     api: "openai-completions",
     headers: headers,
-    models: models,
+    models: validatedModels,
     oauth: {
       name: "Cline",
       async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
@@ -304,7 +319,7 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
                 if (json.redirect_url) finalAuthUrl = json.redirect_url;
             }
         } catch (e) {
-            console.error("Failed to fetch initial auth redirect", e);
+            console.error("[Cline] Failed to fetch initial auth redirect", e);
         }
 
         callbacks.onAuth({ url: finalAuthUrl });
