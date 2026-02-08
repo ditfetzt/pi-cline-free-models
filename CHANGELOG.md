@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-02-08
+
+### Changed
+- Completely removed fallback model logic - now only uses dynamically fetched models from Cline's GitHub source.
+- Changed model source from `cli/src/constants/featured-models.ts` to `webview-ui/src/components/settings/OpenRouterModelPicker.tsx` for more accurate free model list (includes `stealth/giga-potato`).
+- Removed all hardcoded model-specific logic (no more special handling for "kimi", "minimax", "potato").
+- Cache now stores full model objects instead of just IDs to avoid reconstruction with hardcoded assumptions.
+- Removed all debug console logging for cleaner output.
+
+### Fixed
+- Fixed regex to properly parse TypeScript array syntax (no semicolon after closing bracket).
+- Models are now immediately available via `/scoped-models` and `/model` commands on startup when cached.
+
 ## [v0.1.7] - 2026-02-07
 ### Fixed
 - Fixed compatibility with Pi v0.52.7+ standards.
