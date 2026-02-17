@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.2.2] - 2026-02-17
+
+### Fixed
+- Aligned Cline identity/auth headers with current VS Code extension behavior (`X-Platform`, `X-Client-Type`, version headers).
+- Improved OAuth code exchange robustness by handling missing provider hints and trying common provider values.
+- Fixed recurring `403 access forbidden` by shaping Cline provider user context into the envelope expected by `api.cline.bot` (`<task>`, task_progress block, and environment_details block).
+- Rotated `X-Task-ID` more reliably by re-registering provider before agent start.
+
+### Changed
+- Added optional `PI_CLINE_API_BASE` environment override for controlled API/proxy debugging.
+- Added optional scaffold loading from local debug capture directories for Cline context-shaping parity.
+
+### Documentation
+- Added update guidance and `403` troubleshooting steps to README.
+- Updated remote/SSH auth instructions to prefer pasting full callback URL (including provider hint).
+
 ## [v0.2.1] - 2026-02-08
 
 ### Documentation

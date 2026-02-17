@@ -5,12 +5,242 @@ import * as url from "node:url";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import * as crypto from "node:crypto";
+
+// ULID generation (Crockford's Base32, 48-bit timestamp + 80-bit random)
+const ULID_CHARS = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+function generateUlid(): string {
+  const now = Date.now();
+  let ts = "";
+  let t = now;
+  for (let i = 0; i < 10; i++) {
+    ts = ULID_CHARS[t % 32] + ts;
+    t = Math.floor(t / 32);
+  }
+  const rand = crypto.randomBytes(16);
+  let r = "";
+  for (let i = 0; i < 16; i++) {
+    r += ULID_CHARS[rand[i] % 32];
+  }
+  return ts + r;
+}
+
+// Cline client identity (match official VS Code extension)
+const CLINE_VERSION = "3.63.0";
+const CLINE_API_BASE = (process.env.PI_CLINE_API_BASE || "https://api.cline.bot/api/v1").replace(/\/+$/, "");
+const CLINE_PLATFORM = "Visual Studio Code";
+const CLINE_PLATFORM_VERSION = "1.109.3";
+const CLINE_CLIENT_TYPE = "VSCode Extension";
+
+function buildBasicClineHeaders(): Record<string, string> {
+  return {
+    "X-Platform": CLINE_PLATFORM,
+    "X-Platform-Version": CLINE_PLATFORM_VERSION,
+    "X-Client-Type": CLINE_CLIENT_TYPE,
+    "X-Client-Version": CLINE_VERSION,
+    "X-Core-Version": CLINE_VERSION,
+  };
+}
+
+function buildClineCompletionHeaders(taskId: string = generateUlid()): Record<string, string> {
+  return {
+    "HTTP-Referer": "https://cline.bot",
+    "X-Title": "Cline",
+    "X-Task-ID": taskId,
+    ...buildBasicClineHeaders(),
+    "X-Is-Multiroot": "false",
+  };
+}
+
+function buildClineAuthHeaders(): Record<string, string> {
+  return {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    ...buildBasicClineHeaders(),
+  };
+}
+
+type ClineScaffold = {
+  taskProgress: string;
+  environmentDetails: string;
+};
+
+const FALLBACK_TASK_PROGRESS_BLOCK = `
+# task_progress List (Optional - Plan Mode)
+
+While in PLAN MODE, if you've outlined concrete steps or requirements for the user, you may include a preliminary todo list using the task_progress parameter.
+
+Reminder on how to use the task_progress parameter:
+
+
+1. To create or update a todo list, include the task_progress parameter in the next tool call
+2. Review each item and update its status:
+   - Mark completed items with: - [x]
+   - Keep incomplete items as: - [ ]
+   - Add new items if you discover additional steps
+3. Modify the list as needed:
+		- Add any new steps you've discovered
+		- Reorder if the sequence has changed
+4. Ensure the list accurately reflects the current state
+
+**Remember:** Keeping the task_progress list updated helps track progress and ensures nothing is missed.`;
+
+function formatLocalTimeWithTimezone(): string {
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+    hour12: true,
+  });
+  const timeZone = formatter.resolvedOptions().timeZone;
+  const timeZoneOffset = -now.getTimezoneOffset() / 60;
+  const timeZoneOffsetStr = `${timeZoneOffset >= 0 ? "+" : ""}${timeZoneOffset}:00`;
+  return `${formatter.format(now)} (${timeZone}, UTC${timeZoneOffsetStr})`;
+}
+
+function buildFallbackEnvironmentDetails(): string {
+  const cwd = process.cwd();
+  const hint = path.basename(cwd) || "workspace";
+  return `<environment_details>
+# Visual Studio Code Visible Files
+(No visible files)
+
+# Visual Studio Code Open Tabs
+(No open tabs)
+
+# Current Time
+${formatLocalTimeWithTimezone()}
+
+# Current Working Directory (${cwd}) Files
+(No files)
+
+# Workspace Configuration
+{
+  "workspaces": {
+    "${cwd}": {
+      "hint": "${hint}"
+    }
+  }
+}
+
+# Detected CLI Tools
+These are some of the tools on the user's machine, and may be useful if needed to accomplish the task: gh, git, docker, kubectl, npm, yarn, pnpm, cargo, go, curl, jq, make, node, psql, sqlite3, code, grep, sed, awk, brew, bundle. This list is not exhaustive, and other tools may be available.
+
+# Context Window Usage
+0 / 204,8K tokens used (0%)
+
+# Current Mode
+PLAN MODE
+In this mode you should focus on information gathering, asking questions, and architecting a solution. Once you have a plan, use the plan_mode_respond tool to engage in a conversational back and forth with the user. Do not use the plan_mode_respond tool until you've gathered all the information you need e.g. with read_file or ask_followup_question.
+(Remember: If it seems the user wants you to use tools only available in Act Mode, you should ask the user to "toggle to Act mode" (use those words) - they will have to manually do this themselves with the Plan/Act toggle button below. You do not have the ability to switch to Act Mode yourself, and must wait for the user to do it themselves once they are satisfied with the plan. You also cannot present an option to toggle to Act mode, as this will be something you need to direct the user to do manually themselves.)
+</environment_details>`;
+}
+
+function loadScaffoldFromDebugCapture(): ClineScaffold | null {
+  try {
+    const candidateDirs = [
+      process.env.PI_CLINE_CAPTURE_DIR,
+      path.join(process.cwd(), ".debug", "capture"),
+      path.join(process.cwd(), ".debug-capture"), // legacy location
+      path.join(os.homedir(), ".pi", "agent", ".debug", "capture"),
+      path.join(os.homedir(), ".pi", "agent", ".debug-capture"), // legacy location
+    ].filter((d): d is string => !!d);
+
+    for (const captureDir of candidateDirs) {
+      if (!fs.existsSync(captureDir)) continue;
+
+      const files = fs
+        .readdirSync(captureDir)
+        .filter(f => f.endsWith("-request.body.json"))
+        .sort()
+        .reverse();
+
+      for (const file of files) {
+        const body = JSON.parse(fs.readFileSync(path.join(captureDir, file), "utf-8"));
+        const messages = Array.isArray(body?.messages) ? body.messages : [];
+        for (const msg of messages) {
+          if (msg?.role !== "user" || !Array.isArray(msg?.content)) continue;
+          const textBlocks = msg.content
+            .filter((part: any) => part?.type === "text" && typeof part?.text === "string")
+            .map((part: any) => part.text as string);
+
+          const taskProgress = textBlocks.find(t => t.includes("# task_progress List (Optional - Plan Mode)"));
+          const environmentDetails = textBlocks.find(t => t.includes("<environment_details>"));
+
+          if (taskProgress && environmentDetails) {
+            return { taskProgress, environmentDetails };
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore scaffold parse errors
+  }
+  return null;
+}
+
+function isClineWrappedUserContent(content: any): boolean {
+  if (!Array.isArray(content)) return false;
+  const textBlocks = content
+    .filter((part: any) => part?.type === "text" && typeof part?.text === "string")
+    .map((part: any) => part.text as string);
+
+  if (textBlocks.length < 3) return false;
+  const hasTask = textBlocks.some(t => t.includes("<task>"));
+  const hasTaskProgress = textBlocks.some(t => t.includes("# task_progress List (Optional - Plan Mode)"));
+  const hasEnvironment = textBlocks.some(t => t.includes("<environment_details>"));
+  return hasTask && hasTaskProgress && hasEnvironment;
+}
+
+function extractUserText(content: any): string {
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .filter((part: any) => part?.type === "text" && typeof part?.text === "string")
+      .map((part: any) => part.text)
+      .join("\n\n")
+      .trim();
+  }
+  return "";
+}
+
+function wrapUserMessageForCline(content: any, scaffold: ClineScaffold): any[] {
+  const userText = extractUserText(content) || "(no user text)";
+  const images = Array.isArray(content)
+    ? content.filter((part: any) => part?.type === "image" && part?.mimeType && part?.data)
+    : [];
+
+  return [
+    { type: "text", text: `<task>\n${userText}\n</task>` },
+    { type: "text", text: scaffold.taskProgress },
+    { type: "text", text: scaffold.environmentDetails },
+    ...images,
+  ];
+}
 
 // Cache file path for model state persistence
 const MODELS_CACHE_FILE = path.join(os.homedir(), ".pi", "agent", ".cline-models-cache.json");
 
 // Last known models (for comparison)
 let lastKnownModels: any[] = [];
+
+// Track selected provider to limit context shaping to Cline
+let selectedProvider: string | null = null;
+
+// Cline request scaffold (prefer extracted template from local debug capture if available)
+let clineScaffold: ClineScaffold = {
+  taskProgress: FALLBACK_TASK_PROGRESS_BLOCK,
+  environmentDetails: buildFallbackEnvironmentDetails(),
+};
+
+const scaffoldFromCapture = loadScaffoldFromDebugCapture();
+if (scaffoldFromCapture) {
+  clineScaffold = scaffoldFromCapture;
+}
 
 // Load cached models if exists
 try {
@@ -23,12 +253,52 @@ try {
 }
 
 export default function (pi: ExtensionAPI) {
-  // 1. Register provider immediately with cached models if available
+  // Register provider immediately with cached models if available
   // This ensures models are available for /model and /scoped-models right away
   registerClineProvider(pi, lastKnownModels);
 
-  // 2. Schedule non-blocking update on session start
+  // Track selected provider to apply Cline-specific context shaping only when needed
+  pi.on("model_select", async (event) => {
+    selectedProvider = event.model?.provider || null;
+  });
+
+  // Shape outgoing context to mimic Cline's expected request envelope
+  // (currently required by api.cline.bot for chat/completions authorization)
+  pi.on("context", async (event, ctx) => {
+    const provider = (ctx as any)?.model?.provider || selectedProvider;
+    if (provider !== "cline") return;
+
+    const messages = event.messages;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg: any = messages[i];
+      if (msg?.role !== "user") continue;
+
+      if (!isClineWrappedUserContent(msg.content)) {
+        msg.content = wrapUserMessageForCline(msg.content, clineScaffold);
+      }
+      break;
+    }
+
+    return { messages };
+  });
+
+  // Refresh headers (especially X-Task-ID) for every prompt
+  pi.on("before_agent_start", async (_event, ctx) => {
+    selectedProvider = (ctx as any)?.model?.provider || selectedProvider;
+    registerClineProvider(pi, lastKnownModels);
+  });
+
+  // Non-blocking model refresh on session start
   pi.on("session_start", async (_event, ctx) => {
+    // Refresh provider identity at session boundary as well
+    registerClineProvider(pi, lastKnownModels);
+
+    // Reload scaffold from local capture if available
+    const scaffold = loadScaffoldFromDebugCapture();
+    if (scaffold) {
+      clineScaffold = scaffold;
+    }
+
     // Run in background to avoid blocking Pi's startup/UI sequence
     (async () => {
       try {
@@ -47,7 +317,7 @@ export default function (pi: ExtensionAPI) {
 
         if (hasChanged) {
           registerClineProvider(pi, models);
-          
+
           // Save to cache
           try {
             fs.mkdirSync(path.dirname(MODELS_CACHE_FILE), { recursive: true });
@@ -55,11 +325,11 @@ export default function (pi: ExtensionAPI) {
           } catch {
             // Ignore cache save errors
           }
-          
+
           // Determine what changed for better messaging
           const added = newModelIds.filter(id => !lastKnownIds.includes(id));
           const removed = lastKnownIds.filter(id => !newModelIds.includes(id));
-          
+
           if (lastKnownModels.length === 0) {
             // First time - just mention count
             ctx.ui.notify(`Cline: ${models.length} models available`, "info");
@@ -70,7 +340,7 @@ export default function (pi: ExtensionAPI) {
           } else if (removed.length > 0) {
             ctx.ui.notify(`Cline: ${removed.length} models removed (${models.length} total)`, "info");
           }
-          
+
           lastKnownModels = models;
         }
       } catch (error) {
@@ -184,6 +454,11 @@ async function fetchModels(): Promise<any[]> {
       cost: cost,
       contextWindow: contextWindow,
       maxTokens: maxTokens,
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        maxTokensField: "max_tokens" as const,
+      },
     });
   }
 
@@ -197,14 +472,7 @@ function extractNameFromId(id: string): string {
 }
 
 function registerClineProvider(pi: ExtensionAPI, models: any[]) {
-  const headers = {
-    "HTTP-Referer": "https://cline.bot",
-    "X-Title": "Cline",
-    "X-Client-Type": "extension",
-    "X-Client-Version": "3.57.1",
-    "X-Core-Version": "3.57.1",
-    "User-Agent": "Cline/3.57.1",
-  };
+  const headers = buildClineCompletionHeaders();
 
   // Ensure all models have strictly valid metadata
   const validatedModels = models.map(model => ({
@@ -219,7 +487,7 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
   }));
 
   pi.registerProvider("cline", {
-    baseUrl: "https://api.cline.bot/api/v1",
+    baseUrl: CLINE_API_BASE,
     authHeader: true,
     api: "openai-completions",
     headers: headers,
@@ -232,7 +500,7 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
         const callbackUrl = `http://127.0.0.1:${serverPort}/auth`;
         
         // Build the auth URL
-        const authUrl = new URL("https://api.cline.bot/api/v1/auth/authorize");
+        const authUrl = new URL(`${CLINE_API_BASE}/auth/authorize`);
         authUrl.searchParams.set("client_type", "extension");
         authUrl.searchParams.set("callback_url", callbackUrl);
         authUrl.searchParams.set("redirect_uri", callbackUrl);
@@ -242,7 +510,7 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
             const response = await fetch(authUrl.toString(), {
                 method: "GET",
                 redirect: "manual",
-                headers: { "Content-Type": "application/json" }
+                headers: buildClineAuthHeaders()
             });
             if (response.status >= 300 && response.status < 400) {
                 const loc = response.headers.get("Location");
@@ -386,9 +654,10 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
   2. Complete the login
   3. The browser will fail to connect to localhost
      (only works for same-device auth)
-  4. Copy the code from the URL bar:
-     ${accent}http://127.0.0.1:31234/auth?code=${highlight}${bold}XXX${reset}${accent}${reset}
-  5. Paste the ${highlight}${bold}XXX${reset} code here
+  4. Copy the callback URL from the URL bar:
+     ${accent}http://127.0.0.1:31234/auth?code=${highlight}${bold}XXX${reset}${accent}&provider=...${reset}
+  5. Paste the full callback URL here (preferred),
+     or paste only ${highlight}${bold}XXX${reset}
 `
         });
         
@@ -436,10 +705,12 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
               // Extract code from callback URL if user pasted full URL
               if (userInput.startsWith("http://") || userInput.startsWith("https://")) {
                 try {
-                  const url = new URL(userInput);
-                  const urlCode = url.searchParams.get("code");
+                  const callback = new URL(userInput);
+                  const urlCode = callback.searchParams.get("code");
+                  const urlProvider = callback.searchParams.get("provider");
                   if (urlCode) {
                     code = urlCode;
+                    if (urlProvider) provider = urlProvider;
                   } else {
                     throw new Error("No code found in callback URL");
                   }
@@ -458,42 +729,54 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
             provider = result.provider;
           }
 
-          // Try to decode the code directly (Cline uses base64-encoded tokens)
-          try {
-            const decoded = JSON.parse(Buffer.from(code, "base64").toString("utf-8"));
-            if (decoded.accessToken && decoded.expiresAt) {
-              return {
-                access: `workos:${decoded.accessToken}`,
-                refresh: decoded.refreshToken || "",
-                expires: new Date(decoded.expiresAt).getTime()
-              };
-            }
-          } catch (e) {
-            // Not valid base64 JSON, fall through to token exchange
-          }
+          const tokenUrl = `${CLINE_API_BASE}/auth/token`;
+          const providerCandidates: Array<string | null> = provider
+            ? [provider]
+            : [null, "google", "github", "microsoft", "authkit"];
 
-          const tokenUrl = "https://api.cline.bot/api/v1/auth/token";
-          const exchangeRes = await fetch(tokenUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+          let tokenData: any = null;
+          let lastExchangeError = "";
+
+          for (const providerCandidate of providerCandidates) {
+            const payload: Record<string, string> = {
               grant_type: "authorization_code",
               code: code,
               client_type: "extension",
               redirect_uri: callbackUrl,
-              provider: provider || "github" 
-            })
-          });
+            };
+            if (providerCandidate) {
+              payload.provider = providerCandidate;
+            }
 
-          if (!exchangeRes.ok) throw new Error(`Token exchange failed: ${exchangeRes.status}`);
+            const exchangeRes = await fetch(tokenUrl, {
+              method: "POST",
+              headers: buildClineAuthHeaders(),
+              body: JSON.stringify(payload)
+            });
 
-          const data = await exchangeRes.json() as any;
-          if (!data.success || !data.data) throw new Error("Invalid token response");
+            if (!exchangeRes.ok) {
+              const errText = await exchangeRes.text().catch(() => "");
+              lastExchangeError = `${exchangeRes.status}${errText ? `: ${errText.slice(0, 120)}` : ""}`;
+              continue;
+            }
+
+            const data = await exchangeRes.json() as any;
+            if (data?.success && data?.data?.accessToken) {
+              tokenData = data.data;
+              provider = providerCandidate || provider;
+              break;
+            }
+            lastExchangeError = "Invalid token response";
+          }
+
+          if (!tokenData) {
+            throw new Error(`Token exchange failed${lastExchangeError ? ` (${lastExchangeError})` : ""}`);
+          }
 
           return {
-            access: `workos:${data.data.accessToken}`,
-            refresh: data.data.refreshToken,
-            expires: new Date(data.data.expiresAt).getTime()
+            access: `workos:${tokenData.accessToken}`,
+            refresh: tokenData.refreshToken,
+            expires: new Date(tokenData.expiresAt).getTime()
           };
         } catch (error) {
           // Clean up server on error
@@ -518,10 +801,10 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
       },
 
       async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-        const refreshUrl = "https://api.cline.bot/api/v1/auth/refresh";
+        const refreshUrl = `${CLINE_API_BASE}/auth/refresh`;
         const response = await fetch(refreshUrl, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: buildClineAuthHeaders(),
             body: JSON.stringify({
                 refreshToken: credentials.refresh,
                 grantType: "refresh_token"

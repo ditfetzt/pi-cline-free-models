@@ -28,6 +28,18 @@ Install directly via `pi`:
 pi install npm:pi-cline-free-models
 ```
 
+## Updating
+
+If you already have this extension installed, update and reload Pi:
+
+```bash
+pi install npm:pi-cline-free-models
+```
+
+Then run `/reload` (or restart Pi).
+
+Most users do **not** need to re-authenticate after updating. If you still get `403 access forbidden`, run `/logout` for Cline and then `/login` again.
+
 ## Usage
 
 ### 1. Select a Model
@@ -49,15 +61,27 @@ If you're running Pi on a remote server (e.g., VPS via SSH), the local callback 
 1. Copy the auth URL shown in Pi and open it in a browser on your **local machine**
 2. Complete the login with your desired SSO method
 3. The browser will fail to connect to `localhost` (this is expected - the callback only works on the same machine)
-4. Copy the **code** from the URL bar:
+4. Copy the callback URL from the URL bar:
    ```
-   http://127.0.0.1:31234/auth?code=XXX
+   http://127.0.0.1:31234/auth?code=XXX&provider=...
    ```
-5. Paste just the `XXX` code part back into Pi when prompted
+5. Paste the **full callback URL** into Pi when prompted (preferred).
+   - Pasting only `XXX` still works in most cases.
 6. Pi is now authorized to generate text
 
 ### 3. Update Models
 The extension checks for new models every time Pi starts a new session. If Cline adds a new free model to their list, it will automatically appear in your selector the next time you start Pi or use `/reload`.
+
+## Troubleshooting
+
+### `403 access forbidden`
+
+1. Update extension and run `/reload`
+2. Ensure a Cline model is selected
+3. If it still fails, run `/logout` (Cline) and `/login` again
+4. For remote/SSH auth, paste the full callback URL (including `provider=...`) when prompted
+
+No VS Code extension run is required for normal usage.
 
 ## Development
 
