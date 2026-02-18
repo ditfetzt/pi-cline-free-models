@@ -4,30 +4,6 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.3.0] - 2026-02-18
-
-### Fixed
-- **Fixed model amnesia / infinite inspection loops**: Assistant reasoning text from tool-call turns was being completely stripped from the collapsed Cline transcript, causing the model to lose all memory of its prior decisions and restart from scratch every turn. Now the assistant's reasoning text (e.g. "I'll create tsconfig.json next") is preserved in the transcript as `[assistant]` blocks while still stripping raw tool-call metadata for Anthropic compatibility.
-- Restored OAuth callback server cleanup helper to correctly close and null the active server instance (prevents auth port leaks and follow-up login issues).
-- Added de-duplication for repeated identical non-empty tool results in collapsed Cline transcripts, with a guidance system note to avoid read/review loops.
-- Added task-scope anchoring from the latest explicit `<skill ...>` request and avoided wrapped-history reuse on fresh session/model switches to prevent cross-task drift.
-- Normalized inspection-command family keys for `ls`, `cat`, and `git` variants so flag/argument variations (e.g. `ls` vs `ls -la` vs `ls -la && cat file`) collapse into the same loop-detection family, preventing the model from evading per-family thresholds.
-- Added `cat` and `tree` to the set of recognized inspection commands for loop detection.
-- Added a global inspection-loop counter (`totalInspectionCallsSinceMutation`) that tracks ALL inspection calls since the last edit/write, with a threshold of 8. This catches loops where the model varies commands across different families to stay under the per-family limit of 4.
-- Compound bash commands (using `&&`, `||`, `;`) are now classified by their leading segment for family normalization, preventing `ls -la && cat package.json` from being treated as a separate family from `ls -la`.
-- Added inspection-loop suppression for repeated read-only command families (for example repeated `git diff`/`read` cycles), with loop-state reconstruction from prior collapsed transcript so detection persists across turns.
-- Refined loop detection to treat distinct command arguments as separate families (preventing false positives when inspecting multiple files with `git diff` or `ls`).
-- Added loop-counter reset on `edit` or `write` operations to allow re-inspection of modified state without suppression.
-- Strengthened loop suppression by replacing repeated tool outputs with explicit "Loop detected" error messages in the transcript, forcing the model to acknowledge the failure and change strategy.
-- Fixed race condition in task-scope anchoring by replacing module-level state with session-specific context flags.
-- Fixed potential logic error where stale inspection counts could trigger incorrect suppression after a mutating operation.
-- Removed misleading "Plan Mode" vs "Act Mode" toggle instructions from the fallback environment details, as Pi operates in a single execution mode.
-- Improved loop feedback messages to distinguish between `read` and `bash` operations, providing clearer guidance on how to resolve the loop.
-- Relaxed inspection-loop threshold from 2 to 4 to allow reasonable command retries (like `pnpm create` failures) before triggering suppression.
-- Corrected the detection of `task_progress` blocks in message history to handle the removal of "Plan Mode" text from the template.
-- Implemented robust `extractTaskBodyFromWrappedContent` logic using index finding instead of regex to prevent history truncation on nested XML-like tags.
-- Improved `sessionId` safety by adding optional chaining accessors to `ctx` object to prevent potential crashes on older runtimes.
-
 ## [v0.2.3] - 2026-02-18
 
 ### Fixed

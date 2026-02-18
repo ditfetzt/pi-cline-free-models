@@ -66,9 +66,9 @@ type ClineScaffold = {
 };
 
 const FALLBACK_TASK_PROGRESS_BLOCK = `
-# task_progress List (Optional)
+# task_progress List (Optional - Plan Mode)
 
-If you've outlined concrete steps or requirements for the user, you may include a preliminary todo list using the task_progress parameter.
+While in PLAN MODE, if you've outlined concrete steps or requirements for the user, you may include a preliminary todo list using the task_progress parameter.
 
 Reminder on how to use the task_progress parameter:
 
@@ -134,8 +134,9 @@ These are some of the tools on the user's machine, and may be useful if needed t
 0 / 204,8K tokens used (0%)
 
 # Current Mode
-ACT MODE
-In this mode, you have full access to all tools (read, write, bash, etc.) and should proceed with executing the user's task directly. You do not need to ask for permission to switch modes.
+PLAN MODE
+In this mode you should focus on information gathering, asking questions, and architecting a solution. Once you have a plan, use the plan_mode_respond tool to engage in a conversational back and forth with the user. Do not use the plan_mode_respond tool until you've gathered all the information you need e.g. with read_file or ask_followup_question.
+(Remember: If it seems the user wants you to use tools only available in Act Mode, you should ask the user to "toggle to Act mode" (use those words) - they will have to manually do this themselves with the Plan/Act toggle button below. You do not have the ability to switch to Act Mode yourself, and must wait for the user to do it themselves once they are satisfied with the plan. You also cannot present an option to toggle to Act mode, as this will be something you need to direct the user to do manually themselves.)
 </environment_details>`;
 }
 
@@ -167,7 +168,7 @@ function loadScaffoldFromDebugCapture(): ClineScaffold | null {
             .filter((part: any) => part?.type === "text" && typeof part?.text === "string")
             .map((part: any) => part.text as string);
 
-          const taskProgress = textBlocks.find((t: string) => t.includes("# task_progress List"));
+          const taskProgress = textBlocks.find((t: string) => t.includes("# task_progress List (Optional - Plan Mode)"));
           const environmentDetails = textBlocks.find((t: string) => t.includes("<environment_details>"));
 
           if (taskProgress && environmentDetails) {
@@ -218,7 +219,7 @@ function isClineWrappedUserContent(content: any): boolean {
   if (textBlocks.length < 1) return false;
 
   const hasTask = textBlocks.some((t: string) => /<task>[\s\S]*<\/task>/.test(t));
-  const hasTaskProgress = textBlocks.some((t: string) => t.includes("# task_progress List"));
+  const hasTaskProgress = textBlocks.some((t: string) => t.includes("# task_progress List (Optional - Plan Mode)"));
   const hasEnvironment = textBlocks.some((t: string) => t.includes("<environment_details>"));
 
   return hasTask && hasTaskProgress && hasEnvironment;
@@ -229,227 +230,13 @@ function extractTaskBodyFromWrappedContent(content: any): string {
 
   for (const part of content) {
     if (part?.type !== "text" || typeof part?.text !== "string") continue;
-    const text = part.text.trim();
-    
-    // Use precise index finding to handle nested <task> tags (e.g. in file content)
-    // without getting tricked by the first closing tag.
-    const startTag = "<task>";
-    const endTag = "</task>";
-    const startIdx = text.indexOf(startTag);
-    const endIdx = text.lastIndexOf(endTag);
-
-    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-      return text.slice(startIdx + startTag.length, endIdx).trim();
+    const match = part.text.match(/<task>\s*([\s\S]*?)\s*<\/task>/);
+    if (match && typeof match[1] === "string") {
+      return match[1].trim();
     }
   }
 
   return "";
-}
-
-const SKILL_NAME_REGEX = /<skill\s+[^>]*name\s*=\s*["']([^"']+)["'][^>]*>/i;
-
-function extractFirstSkillNameFromText(text: string): string | null {
-  if (typeof text !== "string") return null;
-  const match = text.match(SKILL_NAME_REGEX);
-  if (!match || typeof match[1] !== "string") return null;
-
-  const skill = match[1].trim();
-  return skill.length > 0 ? skill : null;
-}
-
-function extractLatestPlainUserText(messages: any[]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg?.role !== "user") continue;
-    if (isClineWrappedUserContent(msg?.content)) continue;
-
-    const text = extractUserText(msg?.content).trim();
-    if (text.length > 0) return text;
-  }
-
-  return "";
-}
-
-type CollapseContextOptions = {
-  ignoreWrappedHistory?: boolean;
-};
-
-function normalizeToolCallSummaryForLoopDetection(summary: string): string {
-  if (typeof summary !== "string") return "";
-
-  let normalized = summary.trim();
-  if (normalized.startsWith("$ ")) {
-    normalized = normalized.slice(2).trim();
-  }
-
-  // Use the full command including any chained prefixes (e.g. cd /path && git diff)
-  // to avoid collapsing distinct operations in different directories.
-  return normalized.replace(/\s+/g, " ");
-}
-
-function detectInspectionToolFamily(toolName: string, toolCallSummary: string): string | null {
-  if (toolName === "read") {
-    const match = toolCallSummary.match(/^read\s+(.+)$/);
-    return match ? `read ${match[1]}` : "read";
-  }
-
-  if (toolName !== "bash") return null;
-
-  const command = normalizeToolCallSummaryForLoopDetection(toolCallSummary);
-  if (!command) return null;
-
-  // Check if this is an inspection command
-  const isInspection =
-    /\bgit\s+(diff|status|log|show)\b/.test(command) ||
-    /\b(find|rg|grep|ls|head|tail|pwd|which|cat|tree)\b/.test(command);
-
-  if (!isInspection) return null;
-
-  // Normalize common inspection commands to coarser family keys to prevent
-  // loop evasion via flag/argument variations (e.g. `ls` vs `ls -la` vs `ls -la && cat file`).
-  
-  // For compound commands (cmd1 && cmd2 | cmd1; cmd2), extract the leading directory-listing
-  // tool if present and normalize to just that.
-  const firstSegment = command.split(/\s*(?:&&|\|\||;)\s*/)[0].trim();
-
-  // Normalize ls variants: `ls`, `ls -la`, `ls -al /path` → `ls /path` or `ls .`
-  const lsMatch = firstSegment.match(/^ls(?:\s+-[a-zA-Z]+)*(?:\s+(.+))?$/);
-  if (lsMatch) {
-    const target = (lsMatch[1] || ".").trim();
-    return `ls ${target}`;
-  }
-
-  // Normalize cat variants: `cat file` → `cat file`
-  const catMatch = firstSegment.match(/^cat\s+(.+)$/);
-  if (catMatch) {
-    return `cat ${catMatch[1].trim()}`;
-  }
-
-  // For git commands, keep the subcommand but normalize flags
-  const gitMatch = firstSegment.match(/^git\s+(diff|status|log|show)(?:\s+.*)?$/);
-  if (gitMatch) {
-    return `git ${gitMatch[1]}`;
-  }
-
-  // For other inspection tools, use the full command as the family key
-  return command;
-}
-
-const TOOL_RESULT_BLOCK_REGEX = /<tool_result>\s*<tool_call>\s*([\s\S]*?)\s*<\/tool_call>\s*([\s\S]*?)\s*<\/tool_result>/g;
-const INSPECTION_LOOP_THRESHOLD = 4; // suppress after this many calls to same family
-const GLOBAL_INSPECTION_LOOP_THRESHOLD = 8; // suppress after this many total inspection calls without mutation
-
-type PriorTranscriptState = {
-  noOutputCountsByCommand: Map<string, number>;
-  seenNoOutputCommands: Set<string>;
-  seenToolResultSignatures: Set<string>;
-  repeatedIdenticalToolResultsByCommand: Map<string, number>;
-  inspectionCommandCountsByFamily: Map<string, number>;
-  totalInspectionCallsSinceMutation: number;
-  mutatingToolCallCount: number;
-};
-
-function incrementCounter(map: Map<string, number>, key: string, delta: number = 1): void {
-  map.set(key, (map.get(key) || 0) + delta);
-}
-
-function setCounterAtLeast(map: Map<string, number>, key: string, value: number): void {
-  const current = map.get(key) || 0;
-  if (value > current) {
-    map.set(key, value);
-  }
-}
-
-function inferToolNameFromToolCallSummary(summary: string): "bash" | "read" | "edit" | "write" | null {
-  if (summary.startsWith("$ ")) return "bash";
-  if (summary.startsWith("read ")) return "read";
-  if (summary.startsWith("edit ")) return "edit";
-  if (summary.startsWith("write ")) return "write";
-  return null;
-}
-
-function buildPriorTranscriptState(baseTranscript: string): PriorTranscriptState {
-  const state: PriorTranscriptState = {
-    noOutputCountsByCommand: new Map<string, number>(),
-    seenNoOutputCommands: new Set<string>(),
-    seenToolResultSignatures: new Set<string>(),
-    repeatedIdenticalToolResultsByCommand: new Map<string, number>(),
-    inspectionCommandCountsByFamily: new Map<string, number>(),
-    totalInspectionCallsSinceMutation: 0,
-    mutatingToolCallCount: 0,
-  };
-
-  if (typeof baseTranscript !== "string" || baseTranscript.trim().length === 0) {
-    return state;
-  }
-
-  let inspectionCallsSinceMutation = 0;
-
-  for (const match of baseTranscript.matchAll(TOOL_RESULT_BLOCK_REGEX)) {
-    const summary = (match[1] || "").trim();
-    const output = (match[2] || "").trim();
-    if (!summary) continue;
-
-    state.seenToolResultSignatures.add(`${summary}\n${output}`);
-
-    const toolName = inferToolNameFromToolCallSummary(summary);
-    if (toolName === "edit" || toolName === "write") {
-      state.mutatingToolCallCount += 1;
-      inspectionCallsSinceMutation = 0;
-    }
-
-    if (output === "(no output)") {
-      setCounterAtLeast(state.noOutputCountsByCommand, summary, 1);
-      state.seenNoOutputCommands.add(summary);
-    }
-
-    if (toolName === "read" || toolName === "bash") {
-      const family = detectInspectionToolFamily(toolName, summary);
-      if (family) {
-        incrementCounter(state.inspectionCommandCountsByFamily, family);
-        inspectionCallsSinceMutation += 1;
-      }
-    }
-  }
-
-  state.totalInspectionCallsSinceMutation = inspectionCallsSinceMutation;
-
-  for (const match of baseTranscript.matchAll(/^- (.+?) -> (\d+) no-output attempts(?:.*)?$/gm)) {
-    const summary = (match[1] || "").trim();
-    const count = Number.parseInt(match[2] || "0", 10);
-    if (!summary || !Number.isFinite(count) || count <= 0) continue;
-
-    setCounterAtLeast(state.noOutputCountsByCommand, summary, count);
-    state.seenNoOutputCommands.add(summary);
-  }
-
-  for (const match of baseTranscript.matchAll(/^- (.+?) -> (\d+) identical tool results$/gm)) {
-    const summary = (match[1] || "").trim();
-    const total = Number.parseInt(match[2] || "0", 10);
-    if (!summary || !Number.isFinite(total) || total <= 1) continue;
-
-    setCounterAtLeast(state.repeatedIdenticalToolResultsByCommand, summary, total - 1);
-  }
-
-  for (const match of baseTranscript.matchAll(/^- (.+?) -> (\d+) inspection calls \((\d+) collapsed\)$/gm)) {
-    const family = (match[1] || "").trim();
-    const total = Number.parseInt(match[2] || "0", 10);
-    if (!family || !Number.isFinite(total) || total <= 0) continue;
-
-    setCounterAtLeast(state.inspectionCommandCountsByFamily, family, total);
-  }
-
-  // Reconstruct global inspection counter from per-family counts
-  // (use the maximum of the inline-computed value and the sum from system_notes)
-  let reconstructedTotal = 0;
-  for (const count of state.inspectionCommandCountsByFamily.values()) {
-    reconstructedTotal += count;
-  }
-  if (reconstructedTotal > state.totalInspectionCallsSinceMutation) {
-    state.totalInspectionCallsSinceMutation = reconstructedTotal;
-  }
-
-  return state;
 }
 
 type ToolCallContext = {
@@ -602,44 +389,26 @@ function sanitizeMessageContentForCline(msg: any): any {
   return { ...baseMessage, content: fallbackText };
 }
 
-function collapseContextMessagesForCline(
-  messages: any[],
-  scaffold: ClineScaffold,
-  options: CollapseContextOptions = {},
-): any[] {
+function collapseContextMessagesForCline(messages: any[], scaffold: ClineScaffold): any[] {
   const toolCallContextById = collectToolCallContext(messages);
   const sanitized = messages.map((m: any) => sanitizeMessageContentForCline(m));
 
   const firstSystem = sanitized.find((m: any) => m?.role === "system");
   const systemText = firstSystem ? extractUserText(firstSystem.content) : "";
-  const latestPlainUserText = extractLatestPlainUserText(sanitized);
-  const activeSkillName = extractFirstSkillNameFromText(latestPlainUserText);
 
   // Idempotency: if we already have a wrapped Cline user message in the history,
   // reuse its <task> body and append only the turns that happened after it.
-  // For a fresh session request, we can skip wrapped history reuse to avoid
-  // accidental carry-over from a previous thread.
   let lastWrappedUserIndex = -1;
   let baseTranscript = "";
 
-  if (!options.ignoreWrappedHistory) {
-    for (let i = sanitized.length - 1; i >= 0; i--) {
-      const msg = sanitized[i];
-      if (msg?.role !== "user") continue;
-      if (!isClineWrappedUserContent(msg?.content)) continue;
+  for (let i = sanitized.length - 1; i >= 0; i--) {
+    const msg = sanitized[i];
+    if (msg?.role !== "user") continue;
+    if (!isClineWrappedUserContent(msg?.content)) continue;
 
-      const candidateTranscript = extractTaskBodyFromWrappedContent(msg.content);
-      if (activeSkillName) {
-        const candidateSkillName = extractFirstSkillNameFromText(candidateTranscript);
-        if (candidateSkillName !== activeSkillName) {
-          continue;
-        }
-      }
-
-      lastWrappedUserIndex = i;
-      baseTranscript = candidateTranscript;
-      break;
-    }
+    lastWrappedUserIndex = i;
+    baseTranscript = extractTaskBodyFromWrappedContent(msg.content);
+    break;
   }
 
   const transcriptParts: string[] = [];
@@ -647,26 +416,9 @@ function collapseContextMessagesForCline(
     transcriptParts.push(baseTranscript);
   }
 
-  if (activeSkillName) {
-    transcriptParts.push(
-      `[system_note]\nActive skill from latest user request: ${activeSkillName}\nStay scoped to this skill and the latest user instruction. Do not start unrelated workflows unless explicitly requested.`,
-    );
-  }
-
   const startIndex = lastWrappedUserIndex >= 0 ? lastWrappedUserIndex + 1 : 0;
-  const priorTranscriptState = buildPriorTranscriptState(baseTranscript);
-  const noOutputCountsByCommand = new Map<string, number>(priorTranscriptState.noOutputCountsByCommand);
-  const seenNoOutputCommands = new Set<string>(priorTranscriptState.seenNoOutputCommands);
-  const repeatedIdenticalToolResultsByCommand = new Map<string, number>(
-    priorTranscriptState.repeatedIdenticalToolResultsByCommand,
-  );
-  const seenToolResultSignatures = new Set<string>(priorTranscriptState.seenToolResultSignatures);
-  const inspectionCommandCountsByFamily = new Map<string, number>(
-    priorTranscriptState.inspectionCommandCountsByFamily,
-  );
-  const suppressedInspectionCommandsByFamily = new Map<string, number>();
-  let mutatingToolCallCount = priorTranscriptState.mutatingToolCallCount;
-  let totalInspectionCallsSinceMutation = priorTranscriptState.totalInspectionCallsSinceMutation;
+  const noOutputCountsByCommand = new Map<string, number>();
+  const seenNoOutputCommands = new Set<string>();
 
   for (let i = startIndex; i < sanitized.length; i++) {
     const sourceMsg = messages[i] ?? {};
@@ -681,18 +433,9 @@ function collapseContextMessagesForCline(
       (Array.isArray((sourceMsg as any)?.content) &&
         (sourceMsg as any).content.some((part: any) => part?.type === "toolCall"));
 
-    // For assistant turns that include tool calls, preserve the reasoning text
-    // so the model retains continuity of thought across turns (what it planned,
-    // what it decided, what it's doing next). Without this the model has total
-    // amnesia and restarts from scratch each turn.
-    // Skip only if the assistant message has no real text (pure tool-call-only turn).
-    if (role === "assistant" && hasToolCallMetadata) {
-      const assistantText = extractUserText(msg?.content).trim();
-      if (assistantText && assistantText !== "(assistant message)") {
-        transcriptParts.push(`[assistant]\n${assistantText}`);
-      }
-      continue;
-    }
+    // Assistant tool-call turns are usually orchestration text ("I'll run ...").
+    // Excluding them reduces self-referential looping while preserving actual tool output.
+    if (role === "assistant" && hasToolCallMetadata) continue;
 
     const text = extractUserText(msg?.content).trim();
     if (!text) continue;
@@ -712,30 +455,7 @@ function collapseContextMessagesForCline(
         (typeof (sourceMsg as any)?.toolName === "string" ? (sourceMsg as any).toolName : "tool");
 
       const toolCallSummary = toolContext?.summary || toolName;
-      if (toolName === "edit" || toolName === "write") {
-        mutatingToolCallCount += 1;
-        // Reset inspection loop counters on any mutation, as state has changed
-        inspectionCommandCountsByFamily.clear();
-        repeatedIdenticalToolResultsByCommand.clear();
-        noOutputCountsByCommand.clear();
-        seenNoOutputCommands.clear();
-        // We also clear suppression history to avoid nagging about stale loops
-        suppressedInspectionCommandsByFamily.clear();
-        totalInspectionCallsSinceMutation = 0;
-      }
-
       const isNoOutputResult = text === "(no output)";
-      const toolResultSignature = `${toolCallSummary}\n${text}`;
-      const inspectionFamily = detectInspectionToolFamily(toolName, toolCallSummary);
-      let inspectionAttemptCount = 0;
-
-      if (inspectionFamily) {
-        const previousCount = inspectionCommandCountsByFamily.get(inspectionFamily) || 0;
-        inspectionAttemptCount = previousCount + 1;
-        inspectionCommandCountsByFamily.set(inspectionFamily, inspectionAttemptCount);
-        totalInspectionCallsSinceMutation += 1;
-      }
-
 
       if (isNoOutputResult) {
         const previousCount = noOutputCountsByCommand.get(toolCallSummary) || 0;
@@ -744,51 +464,10 @@ function collapseContextMessagesForCline(
         // Keep only the first identical no-output command result in transcript
         // so repeated retries don't dominate context and induce loops.
         if (seenNoOutputCommands.has(toolCallSummary)) {
-          // Replace ignored tool result with a forceful stop message
-          transcriptParts.push(
-            `<tool_result>\n<tool_call>\n${toolCallSummary}\n</tool_call>\n(Loop detected: You have already run this command and it returned no output. Do not run it again. Try a different command or proceed.)\n</tool_result>`,
-          );
           continue;
         }
         seenNoOutputCommands.add(toolCallSummary);
-      } else if (seenToolResultSignatures.has(toolResultSignature)) {
-        const duplicateCount = repeatedIdenticalToolResultsByCommand.get(toolCallSummary) || 0;
-        repeatedIdenticalToolResultsByCommand.set(toolCallSummary, duplicateCount + 1);
-        
-        const actionVerb = toolName === "read" ? "read" : "run";
-        const objectNoun = toolName === "read" ? "file" : "command";
-        const hint = toolName === "bash" ? " (If the command was cancelled, it likely requires interactive input. Use flags like '-y' or '--force' to bypass prompts.)" : "";
-        
-        // Forcefully stop repeating the same read/output cycle
-        transcriptParts.push(
-          `<tool_result>\n<tool_call>\n${toolCallSummary}\n</tool_call>\n(Loop detected: You have already ${actionVerb} this ${objectNoun} and received this exact output. Do not ${actionVerb} it again. Move on to the next step.${hint})\n</tool_result>`,
-        );
-        continue;
       }
-
-      if (inspectionFamily && inspectionAttemptCount > INSPECTION_LOOP_THRESHOLD) {
-        const suppressedCount = suppressedInspectionCommandsByFamily.get(inspectionFamily) || 0;
-        suppressedInspectionCommandsByFamily.set(inspectionFamily, suppressedCount + 1);
-        
-        // Forcefully stop repeating the same inspection command
-        transcriptParts.push(
-          `<tool_result>\n<tool_call>\n${toolCallSummary}\n</tool_call>\n(Loop detected: You have inspected this 3+ times. Stop and proceed with edits.)\n</tool_result>`,
-        );
-        continue;
-      }
-
-      // Global inspection loop: too many total inspection calls without any mutation
-      if (inspectionFamily && totalInspectionCallsSinceMutation > GLOBAL_INSPECTION_LOOP_THRESHOLD) {
-        const suppressedCount = suppressedInspectionCommandsByFamily.get(inspectionFamily) || 0;
-        suppressedInspectionCommandsByFamily.set(inspectionFamily, suppressedCount + 1);
-        
-        transcriptParts.push(
-          `<tool_result>\n<tool_call>\n${toolCallSummary}\n</tool_call>\n(Loop detected: You have run ${totalInspectionCallsSinceMutation} inspection commands without making any edits. You are stuck in an inspection loop. STOP inspecting and START writing code. Use the write or edit tool to create files NOW.)\n</tool_result>`,
-        );
-        continue;
-      }
-
-      seenToolResultSignatures.add(toolResultSignature);
 
       transcriptParts.push(
         `<tool_result>\n<tool_call>\n${toolCallSummary}\n</tool_call>\n${text}\n</tool_result>`,
@@ -804,9 +483,9 @@ function collapseContextMessagesForCline(
   if (repeatedNoOutput.length > 0) {
     const lines = repeatedNoOutput
       .map(([summary, count]) => {
-        const hasLikelyWrongDiffScope = /\bgit\s+diff\s+\S*\.\.\.\S*\b/.test(summary);
+        const hasLikelyWrongDiffScope = /git\s+diff\s+main\.\.\.origin\/main/.test(summary);
         const hint = hasLikelyWrongDiffScope
-          ? " (branch-range `git diff ...` can be empty for local uncommitted changes; try `git diff` / `git diff --stat`)"
+          ? " (this branch-range diff can be empty for local uncommitted changes; try `git diff` / `git diff --stat`)"
           : "";
         return `- ${summary} -> ${count} no-output attempts${hint}`;
       })
@@ -814,55 +493,6 @@ function collapseContextMessagesForCline(
 
     transcriptParts.push(
       `[system_note]\nRepeated no-output tool calls detected:\n${lines}\nDo not repeat the same no-output command. Use an alternative command or proceed with available evidence.`,
-    );
-  }
-
-  const repeatedIdenticalToolResults = [...repeatedIdenticalToolResultsByCommand.entries()]
-    .filter(([, count]) => count > 0);
-
-  if (repeatedIdenticalToolResults.length > 0) {
-    const lines = repeatedIdenticalToolResults
-      .map(([summary, count]) => `- ${summary} -> ${count + 1} identical tool results`)
-      .join("\n");
-
-    transcriptParts.push(
-      `[system_note]\nRepeated identical tool results detected:\n${lines}\nAvoid repeating the same read/output cycle. Move forward with edits or produce the final response.`,
-    );
-  }
-
-  const suppressedInspectionCommands = [...suppressedInspectionCommandsByFamily.entries()]
-    .filter(([, count]) => count > 0);
-
-  if (suppressedInspectionCommands.length > 0) {
-    const lines = suppressedInspectionCommands
-      .map(([family, suppressedCount]) => {
-        const totalCount = inspectionCommandCountsByFamily.get(family) || suppressedCount;
-        return `- ${family} -> ${totalCount} inspection calls (${suppressedCount} collapsed)`;
-      })
-      .join("\n");
-
-    const actionHint = mutatingToolCallCount === 0
-      ? "No edit/write actions detected yet. Stop repeating diagnostics and either implement changes or provide the final response."
-      : "Stop repeating diagnostics and continue with concrete progress.";
-
-    transcriptParts.push(
-      `[system_note]\nInspection-command loop detected:\n${lines}\n${actionHint}`,
-    );
-  }
-
-  // Global inspection loop warning: fires when total inspection calls without mutation
-  // exceed the threshold, even if no single family does. This catches the pattern where
-  // the model varies its ls/cat/read commands slightly each time to evade per-family detection.
-  if (
-    totalInspectionCallsSinceMutation > GLOBAL_INSPECTION_LOOP_THRESHOLD &&
-    suppressedInspectionCommands.length === 0
-  ) {
-    const actionHint = mutatingToolCallCount === 0
-      ? "You have NOT created or edited ANY files yet. STOP inspecting and START writing code immediately using the write or edit tool."
-      : "You have made edits before but are now stuck inspecting again. Proceed with the next concrete change.";
-
-    transcriptParts.push(
-      `[system_note]\nGLOBAL INSPECTION LOOP: ${totalInspectionCallsSinceMutation} inspection commands without any file mutations.\n${actionHint}`,
     );
   }
 
@@ -889,17 +519,6 @@ let lastKnownModels: any[] = [];
 
 // Track selected provider to limit context shaping to Cline
 let selectedProvider: string | null = null;
-
-// Track session-specific flags to prevent cross-request state pollution
-const sessionIgnoreWrappedHistory = new Map<string, boolean>();
-
-function shouldIgnoreWrappedHistory(sessionId: string): boolean {
-  return sessionIgnoreWrappedHistory.get(sessionId) ?? true; // Default to true for safety
-}
-
-function setIgnoreWrappedHistory(sessionId: string, value: boolean) {
-  sessionIgnoreWrappedHistory.set(sessionId, value);
-}
 
 function isLikelyClineProvider(ctx: any): boolean {
   const provider = (ctx as any)?.model?.provider;
@@ -953,11 +572,8 @@ export default function (pi: ExtensionAPI) {
   registerClineProvider(pi, lastKnownModels);
 
   // Track selected provider to apply Cline-specific context shaping only when needed
-  pi.on("model_select", async (event, ctx) => {
+  pi.on("model_select", async (event) => {
     selectedProvider = event.model?.provider || null;
-    if (selectedProvider === "cline") {
-      setIgnoreWrappedHistory((ctx as any)?.sessionId || "default", true);
-    }
   });
 
   // Shape outgoing context to mimic Cline's expected request envelope
@@ -965,23 +581,16 @@ export default function (pi: ExtensionAPI) {
   pi.on("context", async (event, ctx) => {
     if (!isLikelyClineProvider(ctx)) return;
     selectedProvider = "cline";
-    const sessionId = (ctx as any)?.sessionId || "default";
 
     const sourceMessages = Array.isArray(event.messages) ? event.messages : [];
-    const messages = collapseContextMessagesForCline(sourceMessages, clineScaffold, {
-      ignoreWrappedHistory: shouldIgnoreWrappedHistory(sessionId),
-    });
+    const messages = collapseContextMessagesForCline(sourceMessages, clineScaffold);
 
-    setIgnoreWrappedHistory(sessionId, false);
     return { messages };
   });
 
   // Refresh headers (especially X-Task-ID) for every prompt
   pi.on("before_agent_start", async (_event, ctx) => {
     if (isLikelyClineProvider(ctx)) {
-      if (selectedProvider !== "cline") {
-        setIgnoreWrappedHistory((ctx as any)?.sessionId || "default", true);
-      }
       selectedProvider = "cline";
     } else {
       selectedProvider = (ctx as any)?.model?.provider || selectedProvider;
@@ -991,9 +600,6 @@ export default function (pi: ExtensionAPI) {
 
   // Non-blocking model refresh on session start
   pi.on("session_start", async (_event, ctx) => {
-    const sessionId = (ctx as any)?.sessionId || "default";
-    setIgnoreWrappedHistory(sessionId, true);
-
     if (isLikelyClineProvider(ctx)) {
       selectedProvider = "cline";
     }
