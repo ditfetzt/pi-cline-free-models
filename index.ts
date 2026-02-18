@@ -168,8 +168,8 @@ function loadScaffoldFromDebugCapture(): ClineScaffold | null {
             .filter((part: any) => part?.type === "text" && typeof part?.text === "string")
             .map((part: any) => part.text as string);
 
-          const taskProgress = textBlocks.find(t => t.includes("# task_progress List (Optional - Plan Mode)"));
-          const environmentDetails = textBlocks.find(t => t.includes("<environment_details>"));
+          const taskProgress = textBlocks.find((t: string) => t.includes("# task_progress List (Optional - Plan Mode)"));
+          const environmentDetails = textBlocks.find((t: string) => t.includes("<environment_details>"));
 
           if (taskProgress && environmentDetails) {
             return { taskProgress, environmentDetails };
@@ -181,19 +181,6 @@ function loadScaffoldFromDebugCapture(): ClineScaffold | null {
     // Ignore scaffold parse errors
   }
   return null;
-}
-
-function isClineWrappedUserContent(content: any): boolean {
-  if (!Array.isArray(content)) return false;
-  const textBlocks = content
-    .filter((part: any) => part?.type === "text" && typeof part?.text === "string")
-    .map((part: any) => part.text as string);
-
-  if (textBlocks.length < 3) return false;
-  const hasTask = textBlocks.some(t => t.includes("<task>"));
-  const hasTaskProgress = textBlocks.some(t => t.includes("# task_progress List (Optional - Plan Mode)"));
-  const hasEnvironment = textBlocks.some(t => t.includes("<environment_details>"));
-  return hasTask && hasTaskProgress && hasEnvironment;
 }
 
 function extractUserText(content: any): string {
@@ -222,6 +209,308 @@ function wrapUserMessageForCline(content: any, scaffold: ClineScaffold): any[] {
   ];
 }
 
+function isClineWrappedUserContent(content: any): boolean {
+  if (!Array.isArray(content)) return false;
+
+  const textBlocks = content
+    .filter((part: any) => part?.type === "text" && typeof part?.text === "string")
+    .map((part: any) => part.text as string);
+
+  if (textBlocks.length < 1) return false;
+
+  const hasTask = textBlocks.some((t: string) => /<task>[\s\S]*<\/task>/.test(t));
+  const hasTaskProgress = textBlocks.some((t: string) => t.includes("# task_progress List (Optional - Plan Mode)"));
+  const hasEnvironment = textBlocks.some((t: string) => t.includes("<environment_details>"));
+
+  return hasTask && hasTaskProgress && hasEnvironment;
+}
+
+function extractTaskBodyFromWrappedContent(content: any): string {
+  if (!Array.isArray(content)) return "";
+
+  for (const part of content) {
+    if (part?.type !== "text" || typeof part?.text !== "string") continue;
+    const match = part.text.match(/<task>\s*([\s\S]*?)\s*<\/task>/);
+    if (match && typeof match[1] === "string") {
+      return match[1].trim();
+    }
+  }
+
+  return "";
+}
+
+type ToolCallContext = {
+  name: string;
+  summary: string;
+};
+
+function parseToolCallArguments(rawArgs: any): any {
+  if (rawArgs == null) return {};
+  if (typeof rawArgs === "object") return rawArgs;
+  if (typeof rawArgs === "string") {
+    try {
+      return JSON.parse(rawArgs);
+    } catch {
+      return { raw: rawArgs };
+    }
+  }
+  return { raw: String(rawArgs) };
+}
+
+function summarizeToolCall(name: string, rawArgs: any): string {
+  const args = parseToolCallArguments(rawArgs);
+
+  if (name === "bash" && typeof args?.command === "string") {
+    return `$ ${args.command}`;
+  }
+
+  if (name === "read" && typeof args?.path === "string") {
+    return `read ${args.path}`;
+  }
+
+  if (name === "edit" && typeof args?.path === "string") {
+    return `edit ${args.path}`;
+  }
+
+  if (name === "write" && typeof args?.path === "string") {
+    return `write ${args.path}`;
+  }
+
+  const compact = JSON.stringify(args);
+  if (compact && compact !== "{}") {
+    return `${name} ${compact.slice(0, 240)}`;
+  }
+
+  return name;
+}
+
+function collectToolCallContext(messages: any[]): Map<string, ToolCallContext> {
+  const byId = new Map<string, ToolCallContext>();
+
+  for (const msg of messages) {
+    const contentParts = Array.isArray(msg?.content) ? msg.content : [];
+
+    const fromContent = contentParts
+      .filter((part: any) => part?.type === "toolCall" && part?.id && part?.name)
+      .map((part: any) => ({
+        id: String(part.id),
+        name: String(part.name),
+        arguments: part.arguments,
+      }));
+
+    const fromToolCalls = Array.isArray(msg?.toolCalls)
+      ? msg.toolCalls
+        .filter((call: any) => call?.id && call?.name)
+        .map((call: any) => ({
+          id: String(call.id),
+          name: String(call.name),
+          arguments: call.arguments,
+        }))
+      : [];
+
+    const fromToolCallsSnake = Array.isArray(msg?.tool_calls)
+      ? msg.tool_calls
+        .filter((call: any) => call?.id && (call?.name || call?.function?.name))
+        .map((call: any) => ({
+          id: String(call.id),
+          name: String(call.name || call.function?.name),
+          arguments: call.arguments ?? call.function?.arguments,
+        }))
+      : [];
+
+    const calls = [...fromContent, ...fromToolCalls, ...fromToolCallsSnake];
+
+    for (const call of calls) {
+      byId.set(call.id, {
+        name: call.name,
+        summary: summarizeToolCall(call.name, call.arguments),
+      });
+    }
+  }
+
+  return byId;
+}
+
+function sanitizeMessageContentForCline(msg: any): any {
+  if (!msg || typeof msg !== "object") return msg;
+
+  const role = typeof msg.role === "string" ? msg.role : "user";
+  const fallbackText =
+    role === "assistant"
+      ? "(assistant message)"
+      : role === "tool"
+        ? "(tool output)"
+        : "(no content)";
+
+  // Remove tool-calling metadata for Cline provider history serialization.
+  // Anthropic-backed routes can reject mixed/empty tool-call message shapes.
+  const baseMessage: any = { ...msg };
+  delete baseMessage.toolCalls;
+  delete baseMessage.tool_calls;
+  delete baseMessage.functionCall;
+  delete baseMessage.function_call;
+  delete baseMessage.toolCall;
+
+  if (typeof msg.content === "string") {
+    return {
+      ...baseMessage,
+      content: msg.content.trim().length > 0 ? msg.content : fallbackText,
+    };
+  }
+
+  if (Array.isArray(msg.content)) {
+    const textParts = msg.content.filter(
+      (part: any) => part?.type === "text" && typeof part?.text === "string" && part.text.trim().length > 0,
+    );
+
+    // Keep images for user turns only; drop other non-text parts (e.g. toolCall)
+    // because they can lead to empty assistant/tool messages on Anthropic routes.
+    const imageParts = role === "user"
+      ? msg.content.filter((part: any) => part?.type === "image" && part?.mimeType && part?.data)
+      : [];
+
+    const normalized = [...textParts, ...imageParts];
+
+    if (textParts.length === 0) {
+      return {
+        ...baseMessage,
+        content: [{ type: "text", text: fallbackText }, ...normalized],
+      };
+    }
+
+    return { ...baseMessage, content: normalized };
+  }
+
+  if (msg.content == null) {
+    return { ...baseMessage, content: fallbackText };
+  }
+
+  // Unknown content shape: coerce to safe text for Anthropic compatibility.
+  return { ...baseMessage, content: fallbackText };
+}
+
+function collapseContextMessagesForCline(messages: any[], scaffold: ClineScaffold): any[] {
+  const toolCallContextById = collectToolCallContext(messages);
+  const sanitized = messages.map((m: any) => sanitizeMessageContentForCline(m));
+
+  const firstSystem = sanitized.find((m: any) => m?.role === "system");
+  const systemText = firstSystem ? extractUserText(firstSystem.content) : "";
+
+  // Idempotency: if we already have a wrapped Cline user message in the history,
+  // reuse its <task> body and append only the turns that happened after it.
+  let lastWrappedUserIndex = -1;
+  let baseTranscript = "";
+
+  for (let i = sanitized.length - 1; i >= 0; i--) {
+    const msg = sanitized[i];
+    if (msg?.role !== "user") continue;
+    if (!isClineWrappedUserContent(msg?.content)) continue;
+
+    lastWrappedUserIndex = i;
+    baseTranscript = extractTaskBodyFromWrappedContent(msg.content);
+    break;
+  }
+
+  const transcriptParts: string[] = [];
+  if (baseTranscript.length > 0) {
+    transcriptParts.push(baseTranscript);
+  }
+
+  const startIndex = lastWrappedUserIndex >= 0 ? lastWrappedUserIndex + 1 : 0;
+  const noOutputCountsByCommand = new Map<string, number>();
+  const seenNoOutputCommands = new Set<string>();
+
+  for (let i = startIndex; i < sanitized.length; i++) {
+    const sourceMsg = messages[i] ?? {};
+    const msg = sanitized[i];
+    const role = typeof msg?.role === "string" ? msg.role : "user";
+    if (role === "system") continue;
+    if (role === "user" && isClineWrappedUserContent(msg?.content)) continue;
+
+    const hasToolCallMetadata =
+      Array.isArray((sourceMsg as any)?.toolCalls) ||
+      Array.isArray((sourceMsg as any)?.tool_calls) ||
+      (Array.isArray((sourceMsg as any)?.content) &&
+        (sourceMsg as any).content.some((part: any) => part?.type === "toolCall"));
+
+    // Assistant tool-call turns are usually orchestration text ("I'll run ...").
+    // Excluding them reduces self-referential looping while preserving actual tool output.
+    if (role === "assistant" && hasToolCallMetadata) continue;
+
+    const text = extractUserText(msg?.content).trim();
+    if (!text) continue;
+
+    if (role === "tool") {
+      const toolCallId =
+        (sourceMsg as any)?.toolCallId ??
+        (sourceMsg as any)?.tool_call_id ??
+        (sourceMsg as any)?.toolCallID ??
+        null;
+
+      const toolContext =
+        typeof toolCallId === "string" ? toolCallContextById.get(toolCallId) : undefined;
+
+      const toolName =
+        toolContext?.name ||
+        (typeof (sourceMsg as any)?.toolName === "string" ? (sourceMsg as any).toolName : "tool");
+
+      const toolCallSummary = toolContext?.summary || toolName;
+      const isNoOutputResult = text === "(no output)";
+
+      if (isNoOutputResult) {
+        const previousCount = noOutputCountsByCommand.get(toolCallSummary) || 0;
+        noOutputCountsByCommand.set(toolCallSummary, previousCount + 1);
+
+        // Keep only the first identical no-output command result in transcript
+        // so repeated retries don't dominate context and induce loops.
+        if (seenNoOutputCommands.has(toolCallSummary)) {
+          continue;
+        }
+        seenNoOutputCommands.add(toolCallSummary);
+      }
+
+      transcriptParts.push(
+        `<tool_result>\n<tool_call>\n${toolCallSummary}\n</tool_call>\n${text}\n</tool_result>`,
+      );
+    } else {
+      transcriptParts.push(`[${role}]\n${text}`);
+    }
+  }
+
+  const repeatedNoOutput = [...noOutputCountsByCommand.entries()]
+    .filter(([, count]) => count > 1);
+
+  if (repeatedNoOutput.length > 0) {
+    const lines = repeatedNoOutput
+      .map(([summary, count]) => {
+        const hasLikelyWrongDiffScope = /git\s+diff\s+main\.\.\.origin\/main/.test(summary);
+        const hint = hasLikelyWrongDiffScope
+          ? " (this branch-range diff can be empty for local uncommitted changes; try `git diff` / `git diff --stat`)"
+          : "";
+        return `- ${summary} -> ${count} no-output attempts${hint}`;
+      })
+      .join("\n");
+
+    transcriptParts.push(
+      `[system_note]\nRepeated no-output tool calls detected:\n${lines}\nDo not repeat the same no-output command. Use an alternative command or proceed with available evidence.`,
+    );
+  }
+
+  const transcript = transcriptParts.join("\n\n").trim() || "(no conversation yet)";
+
+  const collapsed: any[] = [];
+  if (systemText.trim().length > 0) {
+    collapsed.push({ role: "system", content: systemText });
+  }
+
+  collapsed.push({
+    role: "user",
+    content: wrapUserMessageForCline(transcript, scaffold),
+  });
+
+  return collapsed;
+}
+
 // Cache file path for model state persistence
 const MODELS_CACHE_FILE = path.join(os.homedir(), ".pi", "agent", ".cline-models-cache.json");
 
@@ -230,6 +519,31 @@ let lastKnownModels: any[] = [];
 
 // Track selected provider to limit context shaping to Cline
 let selectedProvider: string | null = null;
+
+function isLikelyClineProvider(ctx: any): boolean {
+  const provider = (ctx as any)?.model?.provider;
+  if (provider === "cline") return true;
+  if (selectedProvider === "cline") return true;
+
+  const modelId = (ctx as any)?.model?.id;
+  if (typeof modelId === "string" && lastKnownModels.some((m: any) => m.id === modelId)) return true;
+
+  try {
+    const entries = (ctx as any)?.sessionManager?.getEntries?.();
+    if (Array.isArray(entries)) {
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const entry: any = entries[i];
+        if (entry?.type !== "model_change") continue;
+        if (entry?.provider === "cline") return true;
+        break;
+      }
+    }
+  } catch {
+    // Ignore session history lookup errors
+  }
+
+  return false;
+}
 
 // Cline request scaffold (prefer extracted template from local debug capture if available)
 let clineScaffold: ClineScaffold = {
@@ -265,31 +579,31 @@ export default function (pi: ExtensionAPI) {
   // Shape outgoing context to mimic Cline's expected request envelope
   // (currently required by api.cline.bot for chat/completions authorization)
   pi.on("context", async (event, ctx) => {
-    const provider = (ctx as any)?.model?.provider || selectedProvider;
-    if (provider !== "cline") return;
+    if (!isLikelyClineProvider(ctx)) return;
+    selectedProvider = "cline";
 
-    const messages = event.messages;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg: any = messages[i];
-      if (msg?.role !== "user") continue;
-
-      if (!isClineWrappedUserContent(msg.content)) {
-        msg.content = wrapUserMessageForCline(msg.content, clineScaffold);
-      }
-      break;
-    }
+    const sourceMessages = Array.isArray(event.messages) ? event.messages : [];
+    const messages = collapseContextMessagesForCline(sourceMessages, clineScaffold);
 
     return { messages };
   });
 
   // Refresh headers (especially X-Task-ID) for every prompt
   pi.on("before_agent_start", async (_event, ctx) => {
-    selectedProvider = (ctx as any)?.model?.provider || selectedProvider;
+    if (isLikelyClineProvider(ctx)) {
+      selectedProvider = "cline";
+    } else {
+      selectedProvider = (ctx as any)?.model?.provider || selectedProvider;
+    }
     registerClineProvider(pi, lastKnownModels);
   });
 
   // Non-blocking model refresh on session start
   pi.on("session_start", async (_event, ctx) => {
+    if (isLikelyClineProvider(ctx)) {
+      selectedProvider = "cline";
+    }
+
     // Refresh provider identity at session boundary as well
     registerClineProvider(pi, lastKnownModels);
 
@@ -494,7 +808,6 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
     models: validatedModels,
     oauth: {
       name: "Cline",
-      usesCallbackServer: true,
       async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
         const serverPort = 31234;
         const callbackUrl = `http://127.0.0.1:${serverPort}/auth`;
@@ -526,6 +839,14 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
         // Start the local callback server for the browser to call back to
         let server: http.Server | null = null;
         let timeoutId: NodeJS.Timeout | null = null;
+
+        const closeCallbackServer = () => {
+          const activeServer = server;
+          if (activeServer) {
+            activeServer.close();
+            server = null;
+          }
+        };
         
         const codePromise = new Promise<{ code: string; provider: string | null }>((resolve, reject) => {
           server = http.createServer((req, res) => {
@@ -580,10 +901,7 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
             } catch (e) {
               reject(e);
             } finally {
-              if (server) {
-                server.close();
-                server = null;
-              }
+              closeCallbackServer();
               if (timeoutId) {
                 clearTimeout(timeoutId);
                 timeoutId = null;
@@ -604,20 +922,14 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
           
           // Set up timeout - 5 minutes
           timeoutId = setTimeout(() => {
-            if (server) {
-              server.close();
-              server = null;
-            }
+            closeCallbackServer();
             reject(new Error("TIMEOUT"));
           }, 5 * 60 * 1000);
           
           // Handle abort signal
           if (callbacks.signal) {
             const abortHandler = () => {
-              if (server) {
-                server.close();
-                server = null;
-              }
+              closeCallbackServer();
               if (timeoutId) {
                 clearTimeout(timeoutId);
                 timeoutId = null;
@@ -683,10 +995,7 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
               provider = result.provider;
             } else {
               // Manual input won - need to close the server
-              if (server) {
-                server.close();
-                server = null;
-              }
+              closeCallbackServer();
               if (timeoutId) {
                 clearTimeout(timeoutId);
                 timeoutId = null;
@@ -780,9 +1089,7 @@ function registerClineProvider(pi: ExtensionAPI, models: any[]) {
           };
         } catch (error) {
           // Clean up server on error
-          if (server) {
-            server.close();
-          }
+          closeCallbackServer();
           if (timeoutId) {
             clearTimeout(timeoutId);
           }

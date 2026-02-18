@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.2.3] - 2026-02-18
+
+### Fixed
+- Sanitized Cline request message content before sending to `/chat/completions` to prevent empty content blocks that can cause `400` errors on Anthropic-backed models (e.g. Claude Sonnet 4.6).
+- Normalized Cline message history to text-first blocks for Anthropic compatibility (dropping non-text assistant/tool-call parts and injecting fallback text when needed) to avoid `messages.N content is empty` failures.
+- Hardened Cline context hook activation by inferring active provider from session `model_change` entries when `ctx.model` is unavailable.
+- Coerced unknown message content shapes to safe fallback text to prevent downstream empty-content serialization.
+- Collapsed per-turn Cline context into `system + wrapped user transcript` to avoid Anthropic tool-protocol/empty-content failures on follow-up turns.
+- Made Cline transcript collapsing idempotent by reusing existing `<task>` content and appending only new turns, preventing recursive self-review loops on follow-up tool calls.
+- Preserved tool-call intent in collapsed transcripts by attaching concise tool command summaries (e.g. bash command/path) to `<tool_result>` blocks.
+- Reduced assistant self-repetition by excluding assistant orchestration-only tool-call turns from collapsed history while keeping actual tool outputs.
+- De-duplicated repeated identical no-output tool results and injected a system note when the same command returns no output multiple times (including guidance for common `git diff main...origin/main` misuse).
+
 ## [v0.2.2] - 2026-02-17
 
 ### Fixed
